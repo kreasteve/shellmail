@@ -15,10 +15,36 @@ Python-Script zum Versenden von E-Mails via SMTP mit JSON-Output und Batch-Suppo
 - `pathlib` - File path handling
 - `re` - Email validation
 
-**Installation:**
+## Installation
+
+**1. Repository klonen:**
 ```bash
-# Keine pip install nötig - alles ist Standard Library!
-python3 --version  # Prüfe Python Version (3.7+ erforderlich)
+git clone https://github.com/kreasteve/shellmail.git
+cd shellmail
+```
+
+**2. Ausführbar machen:**
+```bash
+chmod +x send_email.py
+```
+
+**3. Konfigurieren:**
+```bash
+./send_email.py setup
+```
+
+**4. Testen:**
+```bash
+./send_email.py -t your@email.com -s "Test" -m "Hello World"
+```
+
+**Optional - Globale Installation:**
+```bash
+# Symlink erstellen für systemweite Nutzung
+sudo ln -s $(pwd)/send_email.py /usr/local/bin/shellmail
+
+# Dann von überall:
+shellmail -t user@example.com -s "Test" -m "Hello"
 ```
 
 ## Features
