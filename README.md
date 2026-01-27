@@ -2,6 +2,25 @@
 
 Python-Script zum Versenden von E-Mails via SMTP mit JSON-Output und Batch-Support.
 
+## Requirements
+
+**Python:** 3.7+
+
+**Dependencies:** Keine! Nutzt nur Python Standard Library:
+- `smtplib` - SMTP client
+- `email` - Email message handling
+- `json` - JSON parsing/output
+- `csv` - CSV file parsing
+- `argparse` - CLI argument parsing
+- `pathlib` - File path handling
+- `re` - Email validation
+
+**Installation:**
+```bash
+# Keine pip install nötig - alles ist Standard Library!
+python3 --version  # Prüfe Python Version (3.7+ erforderlich)
+```
+
 ## Features
 
 ✅ **Versteckte Config** - Zugangsdaten sicher in `~/.email_config.json`
