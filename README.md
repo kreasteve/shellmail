@@ -1,4 +1,4 @@
-# Email Sender - KI-Optimiert
+# Email Sender - für KI optimiert
 
 Python-Script zum Versenden von E-Mails via SMTP mit JSON-Output und Batch-Support.
 
