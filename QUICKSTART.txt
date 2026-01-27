@@ -1,0 +1,125 @@
+═══════════════════════════════════════════════════════════
+  Email Sender - KI-Optimiert - Schnellstart
+═══════════════════════════════════════════════════════════
+
+FERTIG KONFIGURIERT! ✓
+Config: ~/.email_config.json
+
+──────────────────────────────────────────────────────────
+ EINFACH SENDEN
+──────────────────────────────────────────────────────────
+
+./send_email.py -t user@example.com -s "Betreff" -m "Text"
+
+──────────────────────────────────────────────────────────
+ JSON OUTPUT (für KI/Automation)
+──────────────────────────────────────────────────────────
+
+./send_email.py --json -t user@example.com -s "Test" -m "Hello"
+
+Output:
+{
+  "status": "success",
+  "code": 0,
+  "message": "Email sent successfully",
+  "to": "user@example.com",
+  ...
+}
+
+Exit Codes:
+  0 = Success
+  1 = Config Error
+  2 = Send Error
+  3 = Validation Error
+  4 = File Error
+
+──────────────────────────────────────────────────────────
+ BATCH-VERSAND
+──────────────────────────────────────────────────────────
+
+Text-Datei (eine Email pro Zeile):
+  ./send_email.py --batch users.txt -s "Update" -m "..."
+
+CSV mit Alert-Level:
+  alerts.csv:
+    email,categories,name
+    admin@example.com,"Notfall,Error",Admin
+    dev@example.com,"Error,Info",Developer
+
+  # Nur "Notfall"-Empfänger
+  ./send_email.py --batch alerts.csv --category "Notfall" \
+    -s "ALERT" -m "Kritisch!"
+
+  # "Error" ODER "Info"
+  ./send_email.py --batch alerts.csv \
+    --category "Error" --category "Info" \
+    -s "Update" -m "..."
+
+  # Alle (ohne Filter)
+  ./send_email.py --batch alerts.csv -s "News" -m "..."
+
+Batch + JSON:
+  ./send_email.py --json --batch alerts.csv \
+    --category "Notfall" -s "Alert" -m "..."
+
+──────────────────────────────────────────────────────────
+ USE CASES
+──────────────────────────────────────────────────────────
+
+Alert-System:
+  if critical_error:
+      subprocess.run([
+          "./send_email.py", "--json",
+          "--batch", "alerts.csv",
+          "--category", "Notfall",
+          "-s", "CRITICAL",
+          "-m", error_msg
+      ])
+
+JSON Parsing (Bash):
+  RESULT=$(./send_email.py --json ... 2>&1)
+  STATUS=$(echo "$RESULT" | jq -r '.status')
+  if [ "$STATUS" = "success" ]; then
+      echo "Sent!"
+  fi
+
+Batch mit Fehlerbehandlung:
+  ./send_email.py --json --batch users.csv \
+    -s "Update" -m "..." > result.json
+
+  SUCCESS=$(jq '.success' result.json)
+  FAILED=$(jq '.failed' result.json)
+
+──────────────────────────────────────────────────────────
+ WEITERE OPTIONEN
+──────────────────────────────────────────────────────────
+
+Mit Anhang:
+  ./send_email.py -t user@example.com -s "Report" \
+    -m "..." -a file.pdf
+
+HTML:
+  ./send_email.py -t user@example.com -s "Newsletter" \
+    --html-file newsletter.html
+
+Aus Datei:
+  ./send_email.py -t user@example.com -s "Report" \
+    --text-file message.txt
+
+Verbose + JSON:
+  ./send_email.py --json -v ... 2>debug.log 1>result.json
+
+Config:
+  ./send_email.py show-config
+  ./send_email.py setup
+
+──────────────────────────────────────────────────────────
+ BEISPIEL-DATEIEN
+──────────────────────────────────────────────────────────
+
+alerts_example.csv      - CSV mit Categories
+recipients_example.txt  - Simple Text-Liste
+
+═══════════════════════════════════════════════════════════
+Ausführliche Doku: cat README.md
+═══════════════════════════════════════════════════════════

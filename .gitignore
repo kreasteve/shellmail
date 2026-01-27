@@ -1,0 +1,22 @@
+# Config with credentials
+.env
+.email_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+
+# Test files
+test_*.csv
+test_*.txt
+
+# Logs
+*.log
+debug.log
+
+# Results
+result.json

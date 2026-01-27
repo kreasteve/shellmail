@@ -1,0 +1,6 @@
+email,categories,name
+admin@example.com,"Notfall,Error,Ausfall",Admin Team
+developer@example.com,"Error,Info",Dev Team
+monitor@example.com,"Info,Erfolg",Monitoring
+oncall@example.com,"Notfall,Ausfall",On-Call Team
+report@example.com,"Erfolg,Info",Report Team
