@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-Simple Email Sender
-Supports SMTP with or without authentication
+Shell Email Tool
+Supports SMTP sending and IMAP reading
 """
 
 import smtplib
+import imaplib
 import argparse
 import sys
 import os
 import json
 import csv
 import time
-from datetime import datetime
+import email as email_module
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
+from email.header import decode_header
 from pathlib import Path
 
 
@@ -111,19 +114,34 @@ def setup_config():
         config["smtp_host"] = "smtp.gmail.com"
         config["smtp_port"] = 587
         config["smtp_tls"] = True
+        config["imap_host"] = "imap.gmail.com"
+        config["imap_port"] = 993
+        config["imap_ssl"] = True
     elif choice == "2":
         config["smtp_host"] = "smtp-mail.outlook.com"
         config["smtp_port"] = 587
         config["smtp_tls"] = True
+        config["imap_host"] = "outlook.office365.com"
+        config["imap_port"] = 993
+        config["imap_ssl"] = True
     elif choice == "3":
         config["smtp_host"] = "smtp.strato.de"
         config["smtp_port"] = 587
         config["smtp_tls"] = True
+        config["imap_host"] = "imap.strato.de"
+        config["imap_port"] = 993
+        config["imap_ssl"] = True
     else:
         config["smtp_host"] = input("SMTP Host: ").strip()
         config["smtp_port"] = int(input("SMTP Port (default: 587): ").strip() or "587")
         tls = input("Use TLS? [Y/n]: ").strip().lower()
         config["smtp_tls"] = tls != 'n'
+        imap_host = input("IMAP Host (leave blank to skip): ").strip()
+        if imap_host:
+            config["imap_host"] = imap_host
+            config["imap_port"] = int(input("IMAP Port (default: 993): ").strip() or "993")
+            imap_ssl = input("IMAP SSL? [Y/n]: ").strip().lower()
+            config["imap_ssl"] = imap_ssl != 'n'
 
     print()
     config["smtp_user"] = input("SMTP Username/Email: ").strip()
@@ -440,6 +458,351 @@ def show_config():
     print(f"From Email:       {config.get('smtp_from', 'Not set')}")
     print(f"Default To:       {config.get('default_to', 'Not set')}")
     print()
+    print(f"IMAP Host:        {config.get('imap_host', 'Not set')}")
+    print(f"IMAP Port:        {config.get('imap_port', 'Not set')}")
+    print(f"IMAP SSL:         {config.get('imap_ssl', 'Not set')}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# IMAP helpers
+# ---------------------------------------------------------------------------
+
+def _decode_mime_words(s):
+    """Decode an RFC2047-encoded header value to a plain string."""
+    if s is None:
+        return ""
+    parts = []
+    for raw, charset in decode_header(s):
+        if isinstance(raw, bytes):
+            parts.append(raw.decode(charset or "utf-8", errors="replace"))
+        else:
+            parts.append(raw)
+    return "".join(parts)
+
+
+def _get_text_body(msg):
+    """Extract the plain-text body from an email.message.Message object."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = part.get("Content-Disposition", "")
+            if ct == "text/plain" and "attachment" not in cd:
+                payload = part.get_payload(decode=True)
+                charset = part.get_content_charset() or "utf-8"
+                return payload.decode(charset, errors="replace")
+        # Fallback: try HTML part
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = part.get("Content-Disposition", "")
+            if ct == "text/html" and "attachment" not in cd:
+                payload = part.get_content_payload(decode=True)
+                charset = part.get_content_charset() or "utf-8"
+                return payload.decode(charset, errors="replace")
+        return ""
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="replace")
+        return ""
+
+
+def _parse_since(since_str):
+    """
+    Parse a --since value into a datetime (UTC-aware).
+
+    Supported formats:
+      - "today"          – midnight today (local time → UTC)
+      - "Nh" / "Nm"     – N hours / minutes ago
+      - "Nd"            – N days ago
+      - ISO date         – e.g. "2026-03-10"
+    """
+    now = datetime.now(tz=timezone.utc)
+    s = since_str.strip().lower()
+
+    if s == "today":
+        local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # Convert to UTC-aware
+        offset = datetime.now().astimezone().utcoffset()
+        return local_midnight.replace(tzinfo=timezone.utc) - (offset or timedelta(0))
+
+    import re
+    m = re.fullmatch(r'(\d+)(h|m|d)', s)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit == 'h':
+            return now - timedelta(hours=n)
+        elif unit == 'm':
+            return now - timedelta(minutes=n)
+        elif unit == 'd':
+            return now - timedelta(days=n)
+
+    # Try ISO date
+    try:
+        dt = datetime.strptime(since_str, "%Y-%m-%d")
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+
+    raise ValueError(f"Cannot parse --since value: {since_str!r}. "
+                     "Use: 'today', '1h', '30m', '2d', or 'YYYY-MM-DD'")
+
+
+def _connect_imap(config):
+    """Open and authenticate an IMAP connection. Returns imap object."""
+    imap_host = config.get("imap_host")
+    imap_port = int(config.get("imap_port", 993))
+    imap_ssl = config.get("imap_ssl", True)
+    username = config.get("smtp_user")
+    password = config.get("smtp_pass")
+
+    if not imap_host:
+        raise ValueError("imap_host not set in config. Run 'setup' or edit .email_config.json.")
+    if not username or not password:
+        raise ValueError("IMAP credentials missing (uses smtp_user / smtp_pass from config).")
+
+    if imap_ssl:
+        imap = imaplib.IMAP4_SSL(imap_host, imap_port)
+    else:
+        imap = imaplib.IMAP4(imap_host, imap_port)
+
+    imap.login(username, password)
+    return imap
+
+
+def _msg_to_dict(uid, raw_msg, flags):
+    """Parse a raw RFC822 message bytes into a result dict."""
+    msg = email_module.message_from_bytes(raw_msg)
+
+    sender = _decode_mime_words(msg.get("From", ""))
+    subject = _decode_mime_words(msg.get("Subject", ""))
+    date_str = msg.get("Date", "")
+    message_id = msg.get("Message-ID", "").strip()
+    body = _get_text_body(msg)
+    is_unread = b"\\Seen" not in flags
+
+    return {
+        "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+        "message_id": message_id,
+        "from": sender,
+        "subject": subject,
+        "date": date_str,
+        "unread": is_unread,
+        "body": body,
+    }
+
+
+def cmd_check(args, config):
+    """
+    Connect via IMAP, list emails from INBOX.
+
+    Filters: --from, --since
+    Output: human-readable or --json
+    """
+    try:
+        imap = _connect_imap(config)
+    except Exception as e:
+        result = {
+            "status": "error",
+            "code": EXIT_CONFIG_ERROR,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+        output_result(result, args.json)
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    try:
+        imap.select("INBOX", readonly=True)
+
+        # Build IMAP search criteria
+        criteria = []
+
+        if hasattr(args, 'unread_only') and args.unread_only:
+            criteria.append("UNSEEN")
+
+        if hasattr(args, 'from_filter') and args.from_filter:
+            criteria.append(f'FROM "{args.from_filter}"')
+
+        if hasattr(args, 'since') and args.since:
+            since_dt = _parse_since(args.since)
+            # IMAP SINCE uses DD-Mon-YYYY format (server-side date, not time)
+            imap_date = since_dt.strftime("%d-%b-%Y")
+            criteria.append(f'SINCE {imap_date}')
+
+        search_str = " ".join(criteria) if criteria else "ALL"
+
+        typ, data = imap.uid("SEARCH", None, search_str)
+        if typ != "OK":
+            raise RuntimeError(f"IMAP SEARCH failed: {data}")
+
+        uid_list = data[0].split() if data[0] else []
+
+        emails = []
+        for uid in uid_list:
+            typ2, msg_data = imap.uid("FETCH", uid, "(FLAGS RFC822)")
+            if typ2 != "OK" or not msg_data or msg_data[0] is None:
+                continue
+
+            # msg_data is [(b'... FLAGS (\\Seen)', b'raw...'), b')']
+            flags = b""
+            raw_bytes = None
+            for part in msg_data:
+                if isinstance(part, tuple):
+                    header_info = part[0]
+                    raw_bytes = part[1]
+                    # Extract FLAGS from header_info
+                    import re as _re
+                    m = _re.search(rb'FLAGS \(([^)]*)\)', header_info)
+                    if m:
+                        flags = m.group(1)
+
+            if raw_bytes is None:
+                continue
+
+            record = _msg_to_dict(uid, raw_bytes, flags)
+            emails.append(record)
+
+        imap.logout()
+
+        # Client-side since filtering (for sub-day precision the IMAP SINCE
+        # criterion only goes to day granularity)
+        if hasattr(args, 'since') and args.since:
+            since_dt = _parse_since(args.since)
+            filtered = []
+            for em in emails:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    msg_dt = parsedate_to_datetime(em["date"])
+                    # Make timezone-aware if naive
+                    if msg_dt.tzinfo is None:
+                        msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+                    if msg_dt >= since_dt:
+                        filtered.append(em)
+                except Exception:
+                    filtered.append(em)  # include if date unparseable
+            emails = filtered
+
+        result = {
+            "status": "success",
+            "code": EXIT_SUCCESS,
+            "count": len(emails),
+            "emails": emails,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            if not emails:
+                print("No emails found.")
+            else:
+                print(f"Found {len(emails)} email(s):\n")
+                for i, em in enumerate(emails, 1):
+                    status_marker = "[UNREAD]" if em["unread"] else "[read]"
+                    print(f"  {i}. {status_marker} {em['from']}")
+                    print(f"     Subject : {em['subject']}")
+                    print(f"     Date    : {em['date']}")
+                    print(f"     UID     : {em['uid']}")
+                    preview = em["body"].strip().replace("\n", " ")[:120]
+                    if preview:
+                        print(f"     Preview : {preview}...")
+                    print()
+
+        sys.exit(EXIT_SUCCESS)
+
+    except Exception as e:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+        result = {
+            "status": "error",
+            "code": EXIT_SEND_ERROR,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+        output_result(result, args.json)
+        sys.exit(EXIT_SEND_ERROR)
+
+
+def cmd_read(args, config):
+    """
+    Fetch a single email by UID, display full body, mark as read.
+    """
+    try:
+        imap = _connect_imap(config)
+    except Exception as e:
+        result = {
+            "status": "error",
+            "code": EXIT_CONFIG_ERROR,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+        output_result(result, args.json)
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    try:
+        # Open INBOX in read-write mode so we can mark as Seen
+        imap.select("INBOX", readonly=False)
+
+        uid = args.id.encode() if isinstance(args.id, str) else args.id
+
+        typ, msg_data = imap.uid("FETCH", uid, "(FLAGS RFC822)")
+        if typ != "OK" or not msg_data or msg_data[0] is None:
+            raise RuntimeError(f"Message UID {args.id} not found.")
+
+        flags = b""
+        raw_bytes = None
+        for part in msg_data:
+            if isinstance(part, tuple):
+                header_info = part[0]
+                raw_bytes = part[1]
+                import re as _re
+                m = _re.search(rb'FLAGS \(([^)]*)\)', header_info)
+                if m:
+                    flags = m.group(1)
+
+        if raw_bytes is None:
+            raise RuntimeError(f"Could not fetch body for UID {args.id}.")
+
+        record = _msg_to_dict(uid, raw_bytes, flags)
+
+        # Mark as read
+        imap.uid("STORE", uid, "+FLAGS", "\\Seen")
+        record["unread"] = False
+
+        imap.logout()
+
+        if args.json:
+            print(json.dumps({"status": "success", "code": EXIT_SUCCESS, **record,
+                              "timestamp": datetime.now().isoformat()}, indent=2))
+        else:
+            print("=" * 60)
+            print(f"From   : {record['from']}")
+            print(f"Subject: {record['subject']}")
+            print(f"Date   : {record['date']}")
+            print(f"UID    : {record['uid']}")
+            print("=" * 60)
+            print()
+            print(record["body"])
+
+        sys.exit(EXIT_SUCCESS)
+
+    except Exception as e:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+        result = {
+            "status": "error",
+            "code": EXIT_SEND_ERROR,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+        output_result(result, args.json)
+        sys.exit(EXIT_SEND_ERROR)
 
 
 def main():
@@ -450,37 +813,67 @@ def main():
         elif sys.argv[1] == 'show-config':
             show_config()
             return 0
+        elif sys.argv[1] == 'check':
+            config = load_config()
+            p = argparse.ArgumentParser(
+                prog=f"{sys.argv[0]} check",
+                description="Check INBOX for emails via IMAP",
+            )
+            p.add_argument("--from", dest="from_filter", metavar="ADDRESS",
+                           help="Filter by sender address")
+            p.add_argument("--since", metavar="TIMESPEC",
+                           help="Show emails since: 'today', '1h', '30m', '2d', 'YYYY-MM-DD'")
+            p.add_argument("--unread", dest="unread_only", action="store_true",
+                           help="Only show unread emails")
+            p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+            check_args = p.parse_args(sys.argv[2:])
+            cmd_check(check_args, config)
+            return 0
+        elif sys.argv[1] == 'read':
+            config = load_config()
+            p = argparse.ArgumentParser(
+                prog=f"{sys.argv[0]} read",
+                description="Read a specific email by UID and mark it as read",
+            )
+            p.add_argument("id", help="Message UID (from 'check' output)")
+            p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+            read_args = p.parse_args(sys.argv[2:])
+            cmd_read(read_args, config)
+            return 0
 
     parser = argparse.ArgumentParser(
-        description="Send emails via SMTP",
+        description="Send emails via SMTP / read emails via IMAP",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Setup:
-  %(prog)s setup          Interactive configuration wizard
+Special commands:
+  %(prog)s setup                          Interactive configuration wizard
+  %(prog)s show-config                    Show current configuration
+  %(prog)s check [--from ADDR] [--since SPEC] [--unread] [--json]
+  %(prog)s read <uid> [--json]
 
-Examples:
+Send examples:
   # Gmail (requires app password)
   %(prog)s --smtp smtp.gmail.com --port 587 --tls \\
            -u your@gmail.com -p app-password \\
            -f your@gmail.com -t recipient@example.com \\
            -s "Subject" -m "Message"
 
-  # Outlook/Hotmail
-  %(prog)s --smtp smtp-mail.outlook.com --port 587 --tls \\
-           -u your@outlook.com -p password \\
-           -f your@outlook.com -t recipient@example.com \\
-           -s "Subject" -m "Message"
-
   # With attachment
-  %(prog)s --smtp smtp.gmail.com --port 587 --tls \\
-           -u your@gmail.com -p password \\
-           -f your@gmail.com -t recipient@example.com \\
-           -s "Subject" -m "Message" -a file.pdf
+  %(prog)s -t recipient@example.com -s "Subject" -m "Message" -a file.pdf
 
   # Local mail server (no auth)
   %(prog)s --smtp localhost --port 25 \\
            -f sender@localhost -t recipient@example.com \\
            -s "Subject" -m "Message"
+
+Check/read examples:
+  %(prog)s check --json
+  %(prog)s check --since 1h --json
+  %(prog)s check --from boss@example.com --since today
+  %(prog)s check --unread
+  %(prog)s read 12345 --json
 
 Environment variables:
   SMTP_HOST       SMTP server hostname

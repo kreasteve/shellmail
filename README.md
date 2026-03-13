@@ -1,6 +1,6 @@
-# Email Sender - für KI optimiert
+# shellmail - für KI optimiert
 
-Python-Script zum Versenden von E-Mails via SMTP mit JSON-Output und Batch-Support.
+Python-Script zum Versenden und Lesen von E-Mails via SMTP/IMAP mit JSON-Output und Batch-Support.
 
 ## Requirements
 
@@ -8,6 +8,7 @@ Python-Script zum Versenden von E-Mails via SMTP mit JSON-Output und Batch-Suppo
 
 **Dependencies:** Keine! Nutzt nur Python Standard Library:
 - `smtplib` - SMTP client
+- `imaplib` - IMAP client
 - `email` - Email message handling
 - `json` - JSON parsing/output
 - `csv` - CSV file parsing
@@ -55,6 +56,7 @@ shellmail -t user@example.com -s "Test" -m "Hello"
 ✅ **Category-System** - Filter Empfänger nach Alert-Level (Notfall, Error, Info, etc.)
 ✅ **Email-Validierung** - Prüft Adressen vor dem Versand
 ✅ **Exit Codes** - Verschiedene Codes für verschiedene Fehlertypen
+✅ **IMAP Empfang** - Postfach lesen, filtern nach Absender/Zeit, als gelesen markieren
 
 ## Schnellstart
 
@@ -177,6 +179,113 @@ report@example.com,"Erfolg,Info",Report Team
 }
 ```
 
+## E-Mails lesen (IMAP)
+
+### `check` - INBOX prüfen
+
+```bash
+# Alle Emails (JSON)
+shellmail check --json
+
+# Nur ungelesene
+shellmail check --unread
+
+# Von bestimmtem Absender
+shellmail check --from boss@example.com
+
+# Seit heute
+shellmail check --since today
+
+# Letzte Stunde
+shellmail check --since 1h
+
+# Letzte 30 Minuten
+shellmail check --since 30m
+
+# Letzte 2 Tage
+shellmail check --since 2d
+
+# Kombiniert
+shellmail check --from boss@example.com --since today --json
+```
+
+**check JSON-Output:**
+```json
+{
+  "status": "success",
+  "code": 0,
+  "count": 2,
+  "emails": [
+    {
+      "uid": "42",
+      "message_id": "<abc123@mail.example.com>",
+      "from": "boss@example.com",
+      "subject": "Weekly Report",
+      "date": "Fri, 13 Mar 2026 10:00:00 +0100",
+      "unread": true,
+      "body": "Please review the attached..."
+    }
+  ],
+  "timestamp": "2026-03-13T11:00:00.000000"
+}
+```
+
+### `read` - Einzelne Email lesen
+
+```bash
+# Email mit UID lesen (UID kommt aus 'check' Output)
+shellmail read 42
+
+# Als JSON
+shellmail read 42 --json
+```
+
+Die Email wird automatisch als gelesen markiert (`unread: false`).
+
+**read JSON-Output:**
+```json
+{
+  "status": "success",
+  "code": 0,
+  "uid": "42",
+  "message_id": "<abc123@mail.example.com>",
+  "from": "boss@example.com",
+  "subject": "Weekly Report",
+  "date": "Fri, 13 Mar 2026 10:00:00 +0100",
+  "unread": false,
+  "body": "Please review the attached...",
+  "timestamp": "2026-03-13T11:00:00.000000"
+}
+```
+
+### IMAP-Konfiguration
+
+Das Script nutzt dieselben Zugangsdaten (`smtp_user` / `smtp_pass`) für IMAP. Nur IMAP-Host und Port müssen zusätzlich konfiguriert werden:
+
+```json
+{
+  "smtp_host": "smtp.strato.de",
+  "smtp_port": 587,
+  "smtp_tls": true,
+  "smtp_user": "deine@domain.de",
+  "smtp_pass": "passwort",
+  "smtp_from": "deine@domain.de",
+  "imap_host": "imap.strato.de",
+  "imap_port": 993,
+  "imap_ssl": true
+}
+```
+
+Beim `setup`-Wizard werden die IMAP-Einstellungen für Gmail, Outlook und Strato automatisch gesetzt.
+
+### IMAP-Einstellungen für gängige Provider
+
+| Provider | imap_host | imap_port | imap_ssl |
+|---|---|---|---|
+| Strato | imap.strato.de | 993 | true |
+| Gmail | imap.gmail.com | 993 | true |
+| Outlook | outlook.office365.com | 993 | true |
+
 ## Use Cases für KI/Automation
 
 ### 1. Alert-System
@@ -276,10 +385,13 @@ nano ~/.email_config.json
   "smtp_host": "smtp.strato.de",
   "smtp_port": 587,
   "smtp_tls": true,
-  "smtp_user": "mt@kreasteve.de",
+  "smtp_user": "deine@domain.de",
   "smtp_pass": "passwort",
-  "smtp_from": "mt@kreasteve.de",
-  "default_to": "empfaenger@example.com"
+  "smtp_from": "deine@domain.de",
+  "default_to": "empfaenger@example.com",
+  "imap_host": "imap.strato.de",
+  "imap_port": 993,
+  "imap_ssl": true
 }
 ```
 
@@ -349,34 +461,42 @@ Das Script sucht in dieser Reihenfolge nach der Config:
 
 ```
 Spezial-Befehle:
-  setup               Interaktive Konfiguration
-  show-config         Config anzeigen
+  setup                     Interaktive Konfiguration
+  show-config               Config anzeigen (SMTP + IMAP)
+  check [Optionen]          INBOX lesen (IMAP)
+  read <uid> [--json]       Email lesen + als gelesen markieren
 
-Email-Parameter:
-  -f, --from-email    Absender-Adresse
-  -t, --to            Empfänger-Adresse
-  -s, --subject       Betreff (erforderlich)
-  -m, --message       Nachricht
-  --text-file         Nachricht aus Datei
-  --html              HTML-Nachricht
-  --html-file         HTML aus Datei
-  -a, --attachment    Datei anhängen (mehrfach möglich)
+check-Optionen:
+  --from ADDRESS            Filter nach Absender
+  --since TIMESPEC          Filter nach Zeit: 'today', '1h', '30m', '2d', 'YYYY-MM-DD'
+  --unread                  Nur ungelesene
+  --json                    JSON-Output
+
+Email-Parameter (send):
+  -f, --from-email          Absender-Adresse
+  -t, --to                  Empfänger-Adresse
+  -s, --subject             Betreff (erforderlich)
+  -m, --message             Nachricht
+  --text-file               Nachricht aus Datei
+  --html                    HTML-Nachricht
+  --html-file               HTML aus Datei
+  -a, --attachment          Datei anhängen (mehrfach möglich)
 
 Batch-Mode:
-  --batch FILE        CSV oder Text-Datei mit Empfängern
-  --category CAT      Filter nach Category (mehrfach möglich)
+  --batch FILE              CSV oder Text-Datei mit Empfängern
+  --category CAT            Filter nach Category (mehrfach möglich)
 
 SMTP-Config (überschreibt ~/.email_config.json):
-  --smtp              SMTP-Server
-  --port              SMTP-Port
-  --tls               TLS verwenden
-  -u, --username      SMTP-Username
-  -p, --password      SMTP-Passwort
+  --smtp                    SMTP-Server
+  --port                    SMTP-Port
+  --tls                     TLS verwenden
+  -u, --username            SMTP-Username
+  -p, --password            SMTP-Passwort
 
 Output/Debug:
-  --json              JSON-Output (für Automation)
-  -v, --verbose       Verbose (stderr)
-  -h, --help          Hilfe
+  --json                    JSON-Output (für Automation)
+  -v, --verbose             Verbose (stderr)
+  -h, --help                Hilfe
 ```
 
 ## CSV Format
