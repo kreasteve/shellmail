@@ -258,6 +258,69 @@ Die Email wird automatisch als gelesen markiert (`unread: false`).
 }
 ```
 
+### `wait` - Auf neue Email warten (IMAP IDLE / Push)
+
+Statt regelmäßig zu pollen wartet `wait` per IMAP IDLE-Protokoll auf eine Server-Push-Benachrichtigung.  Das Script blockiert bis eine neue Email eintrifft (oder der Timeout abläuft) und gibt sie dann sofort aus.
+
+```bash
+# Auf nächste Email warten (max. 5 Minuten, Standard)
+shellmail wait --json
+
+# Nur auf Email von bestimmtem Absender warten
+shellmail wait --from boss@example.com --json
+
+# Mit eigenem Timeout (60 Sekunden)
+shellmail wait --from boss@example.com --timeout 60 --json
+
+# Human-readable Output
+shellmail wait --from boss@example.com
+```
+
+**Verhalten:**
+- Nutzt IMAP IDLE (RFC 2177) – keine Polling-Schleife
+- Wenn der Timeout abläuft ohne passende Email: Ausgabe `NO_NEW_EMAIL`, Exit-Code 5
+- Wenn eine Email ankommt: wird gelesen, als gelesen markiert und ausgegeben
+- Gibt Fehler aus, wenn der IMAP-Server IDLE nicht unterstützt
+
+**wait JSON-Output (Email gefunden):**
+```json
+{
+  "status": "success",
+  "code": 0,
+  "uid": "43",
+  "message_id": "<xyz@mail.example.com>",
+  "from": "boss@example.com",
+  "subject": "Dringende Anfrage",
+  "date": "Fri, 13 Mar 2026 11:30:00 +0100",
+  "unread": false,
+  "body": "Bitte sofort melden...",
+  "timestamp": "2026-03-13T11:30:05.000000"
+}
+```
+
+**wait JSON-Output (Timeout):**
+```json
+{
+  "status": "timeout",
+  "code": 5,
+  "message": "NO_NEW_EMAIL",
+  "timestamp": "2026-03-13T11:35:00.000000"
+}
+```
+
+**Verwendung in Scripts:**
+```bash
+RESULT=$(shellmail wait --from boss@example.com --timeout 120 --json)
+STATUS=$(echo "$RESULT" | jq -r '.status')
+
+if [ "$STATUS" = "success" ]; then
+    SUBJECT=$(echo "$RESULT" | jq -r '.subject')
+    echo "Neue Email: $SUBJECT"
+elif [ "$STATUS" = "timeout" ]; then
+    echo "Keine neue Email innerhalb des Timeouts"
+fi
+```
+
 ### IMAP-Konfiguration
 
 Das Script nutzt dieselben Zugangsdaten (`smtp_user` / `smtp_pass`) für IMAP. Nur IMAP-Host und Port müssen zusätzlich konfiguriert werden:
@@ -465,11 +528,17 @@ Spezial-Befehle:
   show-config               Config anzeigen (SMTP + IMAP)
   check [Optionen]          INBOX lesen (IMAP)
   read <uid> [--json]       Email lesen + als gelesen markieren
+  wait [Optionen]           Auf neue Email warten (IMAP IDLE / Push)
 
 check-Optionen:
   --from ADDRESS            Filter nach Absender
   --since TIMESPEC          Filter nach Zeit: 'today', '1h', '30m', '2d', 'YYYY-MM-DD'
   --unread                  Nur ungelesene
+  --json                    JSON-Output
+
+wait-Optionen:
+  --from ADDRESS            Nur auf Email von diesem Absender warten
+  --timeout SECONDS         Max. Wartezeit in Sekunden (Standard: 300)
   --json                    JSON-Output
 
 Email-Parameter (send):

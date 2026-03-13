@@ -12,6 +12,7 @@ import os
 import json
 import csv
 import time
+import select as _select
 import email as email_module
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
@@ -805,6 +806,208 @@ def cmd_read(args, config):
         sys.exit(EXIT_SEND_ERROR)
 
 
+def cmd_wait(args, config):
+    """
+    Wait for a new email using IMAP IDLE (push, no polling).
+
+    Connects to IMAP, selects INBOX, sends IDLE, and blocks on the
+    socket until the server signals a new message or --timeout expires.
+    When a new email arrives it is fetched and printed (optionally
+    filtered by --from).  Exits with "NO_NEW_EMAIL" if the timeout
+    fires without a matching message.
+    """
+    EXIT_TIMEOUT = 5   # local-only exit code for this command
+
+    try:
+        imap = _connect_imap(config)
+    except Exception as e:
+        result = {
+            "status": "error",
+            "code": EXIT_CONFIG_ERROR,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+        output_result(result, args.json)
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    try:
+        # Check IDLE capability
+        typ, caps_data = imap.capability()
+        caps = b" ".join(caps_data).upper() if caps_data else b""
+        if b"IDLE" not in caps:
+            raise RuntimeError(
+                "IMAP server does not advertise IDLE capability. "
+                "Cannot use push-mode wait."
+            )
+
+        imap.select("INBOX", readonly=False)
+
+        # --- Send raw IDLE command ----------------------------------------
+        # imaplib assigns a tag internally; we build our own so we can
+        # recognise the tagged OK/NO response that ends the IDLE session.
+        tag = b"IDLE001"
+        imap.send(tag + b" IDLE\r\n")
+
+        # Server must respond with a continuation line ("+ idling" or similar)
+        # before it will push untagged EXISTS notifications.
+        continuation = imap.readline()
+        if not continuation.startswith(b"+"):
+            raise RuntimeError(
+                f"IMAP server did not accept IDLE (response: {continuation!r})"
+            )
+
+        # --- Wait for server push -----------------------------------------
+        sock = imap.socket()
+        timeout = getattr(args, "timeout", 300)
+        deadline = time.monotonic() + timeout
+
+        found_uid = None
+        buf = b""
+
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            readable, _, _ = _select.select([sock], [], [], min(remaining, 30))
+
+            if not readable:
+                # No data yet; send a NOOP-style keepalive by re-reading
+                # remaining time and looping (IDLE is still active).
+                continue
+
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+
+            # Look for untagged EXISTS (new message notification).
+            # Format: "* <n> EXISTS\r\n"
+            import re as _re
+            if _re.search(rb'\* \d+ EXISTS', buf):
+                found_uid = True   # flag; actual UID resolved below
+                break
+
+        # --- End IDLE session ---------------------------------------------
+        imap.send(b"DONE\r\n")
+        # Drain the tagged response (IDLE001 OK ...)
+        while True:
+            line = imap.readline()
+            if line.startswith(tag):
+                break
+            if not line:
+                break
+
+        if not found_uid:
+            imap.logout()
+            msg = "NO_NEW_EMAIL"
+            if args.json:
+                print(json.dumps({
+                    "status": "timeout",
+                    "code": EXIT_TIMEOUT,
+                    "message": msg,
+                    "timestamp": datetime.now().isoformat(),
+                }, indent=2))
+            else:
+                print(msg)
+            sys.exit(EXIT_TIMEOUT)
+
+        # --- Find the newest unseen message(s) ----------------------------
+        # After IDLE signals EXISTS we search for UNSEEN messages so we
+        # fetch only the genuinely new ones.
+        search_criteria = ["UNSEEN"]
+        if hasattr(args, "from_filter") and args.from_filter:
+            search_criteria.append(f'FROM "{args.from_filter}"')
+
+        search_str = " ".join(search_criteria)
+        typ, data = imap.uid("SEARCH", None, search_str)
+        if typ != "OK":
+            raise RuntimeError(f"IMAP SEARCH failed: {data}")
+
+        uid_list = data[0].split() if data[0] else []
+
+        if not uid_list:
+            # EXISTS arrived but no UNSEEN message matches the --from filter.
+            imap.logout()
+            msg = "NO_NEW_EMAIL"
+            if args.json:
+                print(json.dumps({
+                    "status": "timeout",
+                    "code": EXIT_TIMEOUT,
+                    "message": msg,
+                    "timestamp": datetime.now().isoformat(),
+                }, indent=2))
+            else:
+                print(msg)
+            sys.exit(EXIT_TIMEOUT)
+
+        # Take the latest (last) matching UID
+        uid = uid_list[-1]
+
+        typ2, msg_data = imap.uid("FETCH", uid, "(FLAGS RFC822)")
+        if typ2 != "OK" or not msg_data or msg_data[0] is None:
+            raise RuntimeError(f"Could not fetch message UID {uid!r}.")
+
+        flags = b""
+        raw_bytes = None
+        for part in msg_data:
+            if isinstance(part, tuple):
+                header_info = part[0]
+                raw_bytes = part[1]
+                import re as _re2
+                m = _re2.search(rb'FLAGS \(([^)]*)\)', header_info)
+                if m:
+                    flags = m.group(1)
+
+        if raw_bytes is None:
+            raise RuntimeError(f"Empty body for UID {uid!r}.")
+
+        record = _msg_to_dict(uid, raw_bytes, flags)
+
+        # Mark as read
+        imap.uid("STORE", uid, "+FLAGS", "\\Seen")
+        record["unread"] = False
+
+        imap.logout()
+
+        if args.json:
+            print(json.dumps({
+                "status": "success",
+                "code": EXIT_SUCCESS,
+                **record,
+                "timestamp": datetime.now().isoformat(),
+            }, indent=2))
+        else:
+            print("=" * 60)
+            print(f"From   : {record['from']}")
+            print(f"Subject: {record['subject']}")
+            print(f"Date   : {record['date']}")
+            print(f"UID    : {record['uid']}")
+            print("=" * 60)
+            print()
+            print(record["body"])
+
+        sys.exit(EXIT_SUCCESS)
+
+    except Exception as e:
+        try:
+            imap.send(b"DONE\r\n")
+        except Exception:
+            pass
+        try:
+            imap.logout()
+        except Exception:
+            pass
+        result = {
+            "status": "error",
+            "code": EXIT_SEND_ERROR,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+        output_result(result, args.json)
+        sys.exit(EXIT_SEND_ERROR)
+
+
 def main():
     # Check for special commands first
     if len(sys.argv) > 1:
@@ -842,6 +1045,21 @@ def main():
             read_args = p.parse_args(sys.argv[2:])
             cmd_read(read_args, config)
             return 0
+        elif sys.argv[1] == 'wait':
+            config = load_config()
+            p = argparse.ArgumentParser(
+                prog=f"{sys.argv[0]} wait",
+                description="Wait for a new email via IMAP IDLE (push, not polling)",
+            )
+            p.add_argument("--from", dest="from_filter", metavar="ADDRESS",
+                           help="Only match emails from this sender address")
+            p.add_argument("--timeout", type=int, default=300, metavar="SECONDS",
+                           help="Max seconds to wait (default: 300)")
+            p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+            wait_args = p.parse_args(sys.argv[2:])
+            cmd_wait(wait_args, config)
+            return 0
 
     parser = argparse.ArgumentParser(
         description="Send emails via SMTP / read emails via IMAP",
@@ -852,6 +1070,7 @@ Special commands:
   %(prog)s show-config                    Show current configuration
   %(prog)s check [--from ADDR] [--since SPEC] [--unread] [--json]
   %(prog)s read <uid> [--json]
+  %(prog)s wait [--from ADDR] [--timeout N] [--json]
 
 Send examples:
   # Gmail (requires app password)
@@ -868,12 +1087,14 @@ Send examples:
            -f sender@localhost -t recipient@example.com \\
            -s "Subject" -m "Message"
 
-Check/read examples:
+Check/read/wait examples:
   %(prog)s check --json
   %(prog)s check --since 1h --json
   %(prog)s check --from boss@example.com --since today
   %(prog)s check --unread
   %(prog)s read 12345 --json
+  %(prog)s wait --json
+  %(prog)s wait --from boss@example.com --timeout 60 --json
 
 Environment variables:
   SMTP_HOST       SMTP server hostname
