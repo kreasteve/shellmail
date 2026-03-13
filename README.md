@@ -49,7 +49,7 @@ shellmail -t user@example.com -s "Test" -m "Hello"
 
 ## Features
 
-✅ **Versteckte Config** - Zugangsdaten sicher in `~/.email_config.json`
+✅ **Versteckte Config** - Zugangsdaten sicher in `.email_config.json` (neben dem Script oder in `~/`)
 ✅ **JSON Output** - Strukturierte, parsbare Ausgaben für KI/Automation
 ✅ **Batch-Versand** - Mehrere Empfänger aus CSV/Text-Datei
 ✅ **Category-System** - Filter Empfänger nach Alert-Level (Notfall, Error, Info, etc.)
@@ -264,7 +264,9 @@ fi
 # Neu einrichten
 ./send_email.py setup
 
-# Manuell bearbeiten
+# Manuell bearbeiten (Pfad je nach Setup)
+nano .email_config.json
+# oder
 nano ~/.email_config.json
 ```
 
@@ -276,15 +278,33 @@ nano ~/.email_config.json
   "smtp_tls": true,
   "smtp_user": "mt@kreasteve.de",
   "smtp_pass": "passwort",
-  "smtp_from": "mt@kreasteve.de"
+  "smtp_from": "mt@kreasteve.de",
+  "default_to": "empfaenger@example.com"
 }
 ```
+
+**`default_to`** (optional): Standard-Empfänger, der verwendet wird wenn `-t` nicht angegeben ist.
+Nützlich für Scripts, die immer an dieselbe Adresse senden.
+
+```bash
+# Mit default_to in der Config: kein -t nötig
+./send_email.py -s "Alert" -m "Server down"
+```
+
+### Config-Datei Suche
+
+Das Script sucht in dieser Reihenfolge nach der Config:
+
+1. `.email_config.json` im gleichen Verzeichnis wie das Script
+2. `~/.email_config.json` im Home-Verzeichnis
+
+`setup` speichert immer in das Verzeichnis neben dem Script (Option 1).
 
 ### Priorität
 
 1. **CLI-Parameter** (höchste)
 2. **Umgebungsvariablen**
-3. **Config-Datei** (~/.email_config.json)
+3. **Config-Datei** (`.email_config.json` neben Script oder `~/.email_config.json`)
 4. **Defaults**
 
 ## SMTP-Provider

@@ -19,7 +19,11 @@ from email import encoders
 from pathlib import Path
 
 
-CONFIG_FILE = Path.home() / ".email_config.json"
+# Config: first check next to script (dot-prefixed), then home directory
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_LOCAL_CONFIG = _SCRIPT_DIR / ".email_config.json"
+_HOME_CONFIG = Path.home() / ".email_config.json"
+CONFIG_FILE = _LOCAL_CONFIG if _LOCAL_CONFIG.exists() else _HOME_CONFIG
 
 # Exit codes
 EXIT_SUCCESS = 0
@@ -68,12 +72,13 @@ def load_config():
 
 
 def save_config(config):
-    """Save configuration to file"""
+    """Save configuration to file (prefers script directory)"""
+    save_path = _LOCAL_CONFIG
     try:
-        with open(CONFIG_FILE, 'w') as f:
+        with open(save_path, 'w') as f:
             json.dump(config, f, indent=2)
         # Set permissions to 600 (only user can read/write)
-        CONFIG_FILE.chmod(0o600)
+        save_path.chmod(0o600)
         return True
     except Exception as e:
         print(f"Error saving config: {e}", file=sys.stderr)
@@ -87,7 +92,7 @@ def setup_config():
     print("=" * 60)
     print()
     print("Your credentials will be saved to:")
-    print(f"  {CONFIG_FILE}")
+    print(f"  {_LOCAL_CONFIG}")
     print()
 
     config = {}
@@ -124,6 +129,9 @@ def setup_config():
     config["smtp_user"] = input("SMTP Username/Email: ").strip()
     config["smtp_pass"] = input("SMTP Password: ").strip()
     config["smtp_from"] = input(f"From Email (default: {config['smtp_user']}): ").strip() or config["smtp_user"]
+    default_to = input("Default recipient email (optional): ").strip()
+    if default_to:
+        config["default_to"] = default_to
 
     print()
     print("Saving configuration...")
@@ -424,12 +432,13 @@ def show_config():
 
     print(f"Config file: {CONFIG_FILE}")
     print()
-    print(f"SMTP Host:     {config.get('smtp_host', 'Not set')}")
-    print(f"SMTP Port:     {config.get('smtp_port', 'Not set')}")
-    print(f"Use TLS:       {config.get('smtp_tls', 'Not set')}")
-    print(f"SMTP User:     {config.get('smtp_user', 'Not set')}")
-    print(f"SMTP Password: {'***' if config.get('smtp_pass') else 'Not set'}")
-    print(f"From Email:    {config.get('smtp_from', 'Not set')}")
+    print(f"SMTP Host:        {config.get('smtp_host', 'Not set')}")
+    print(f"SMTP Port:        {config.get('smtp_port', 'Not set')}")
+    print(f"Use TLS:          {config.get('smtp_tls', 'Not set')}")
+    print(f"SMTP User:        {config.get('smtp_user', 'Not set')}")
+    print(f"SMTP Password:    {'***' if config.get('smtp_pass') else 'Not set'}")
+    print(f"From Email:       {config.get('smtp_from', 'Not set')}")
+    print(f"Default To:       {config.get('default_to', 'Not set')}")
     print()
 
 
@@ -508,15 +517,19 @@ Environment variables:
 
     args = parser.parse_args()
 
+    # Load config file (needed early for default_to)
+    config = load_config()
+
+    # Fall back to default_to from config
+    if not args.to and not args.batch and config.get("default_to"):
+        args.to = config["default_to"]
+
     # Validate required args
     if not args.batch and not args.to:
         parser.error("Either -t/--to or --batch is required")
 
     if not args.subject:
         parser.error("-s/--subject is required")
-
-    # Load config file
-    config = load_config()
 
     # Get configuration with priority: CLI args > env vars > config file > defaults
     smtp_host = args.smtp or os.getenv("SMTP_HOST") or config.get("smtp_host", "localhost")

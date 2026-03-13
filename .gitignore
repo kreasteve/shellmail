@@ -1,6 +1,7 @@
 # Config with credentials
 .env
 .email_config.json
+email_config.json
 
 # Python
 __pycache__/
